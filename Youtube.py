@@ -593,8 +593,8 @@ def main(user_urls: list[str], destination: str, skip_existing: bool) -> None:
 	for url in playlist_urls:
 		playlist = Playlist(url)
 		for counter, youtube in enumerate(playlist.videos):
-			video = Video(youtube, str(Path(destination, slugify(playlist.title, lowercase=False, max_length=128))), url)
-			video.filename = f"{counter}_{video.filename}"
+			video = Video(youtube, str(Path(destination, slugify(playlist.title, separator='_', lowercase=False, max_length=128))), url)
+			video.filename = f"{counter+1}_{video.filename}"
 			download(video, skip_existing)
 
 
