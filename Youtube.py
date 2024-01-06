@@ -1,4 +1,4 @@
-from shared import get_random_str, download_file
+from shared import get_random_str, download_urlfile
 from dataclasses import dataclass, field
 from pytube import YouTube, Playlist, Stream
 from mutagen.mp4 import MP4
@@ -488,7 +488,7 @@ def __download_files(video: Video, _folder: str, _audioname: str, _videoname: st
 			logging.error("Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found",video)
 			print('Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found')
 			return 1  # No thumbnail
-		download_file(video.thumbnail_url, str(Path(_folder, _thumbnailname)))
+		download_urlfile(video.thumbnail_url, str(Path(_folder, _thumbnailname)))
 	except:
 		logging.error("Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found", video)
 		print('Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found')
