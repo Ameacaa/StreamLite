@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 import urllib3
 from selenium.webdriver.chrome.service import Service
@@ -16,7 +17,7 @@ from browsermobproxy import Server
 from random import choice
 from shutil import rmtree
 from pathlib import Path
-import colorama
+from colorama import Fore, Back
 import urllib3
 import requests
 import string
@@ -24,6 +25,8 @@ import time
 import sys
 import os
 
+
+# CLASSES -----------------------------
 
 @dataclass
 class DownloadInfos:
@@ -53,6 +56,23 @@ class ProxyManager:
 	@property
 	def server(self):
 		return self.__server
+
+
+# DECORATORS --------------------------
+
+def chronofunc(func):
+	@wraps(func)
+	def wrapper(*args, **kwargs):
+		begin = time.monotonic_ns()
+		result = func(*args, **kwargs)
+		timetake = (time.monotonic_ns() - begin) / 1_000_000_000
+		print(f'{Back.BLUE}{Fore.RED}Time taken ({func.__name__}): {timetake:.3f} seconds{Fore.RESET}{Back.RESET}')
+		return result
+	
+	return wrapper
+
+
+# FUNCTIONS ---------------------------
 
 
 def persistent_hash(s: str):
@@ -142,7 +162,7 @@ def get_total_video_parts(base_url: str, end_url: str) -> int:
 		return 4096  # Return a maximum value
 
 
-def get_chrome_browser(headless=True, mute=True, download_path=None, proxy=False, ignore_errors=True, driver_logging=False, extention=False):
+def get_chrome_browser(headless=True, mute=True, download_path=None, proxy=False, ignore_errors=True,  driver_logging=False, extention=False):
 	"""
 	Create a automated chrome browser
 	Proxy Server stop -> server.stop()
@@ -154,7 +174,7 @@ def get_chrome_browser(headless=True, mute=True, download_path=None, proxy=False
 	@param ignore_errors: If True, ignore SSL errors and certificate errors (usefull for Twitch download)
 	@param driver_logging: If False, suppress unnecessary logging information in the console
 	@param extention: TODO make it accept extention
-	@return: Without Proxy (Webdriver, None, None) | With Proxy (Webdriver, Client, Server) | If error (None, None, None)
+	@return: Without Proxy (Webdriver) | With Proxy (Webdriver, Client, Server) | If error (None)
 	"""
 	
 	options = webdriver.ChromeOptions()
@@ -163,7 +183,8 @@ def get_chrome_browser(headless=True, mute=True, download_path=None, proxy=False
 	
 	if headless: options.add_argument('--headless=new')
 	if mute: options.add_argument('--mute-audio')
-	if download_path is not None: options.add_experimental_option('prefs', {'download.default_directory': str(download_path)})
+	if download_path is not None: options.add_experimental_option('prefs',
+																  {'download.default_directory': str(download_path)})
 	if not driver_logging: options.add_experimental_option("excludeSwitches", ["enable-logging"])
 	if ignore_errors:
 		options.add_argument('--ignore-ssl-errors=yes')
@@ -176,13 +197,13 @@ def get_chrome_browser(headless=True, mute=True, download_path=None, proxy=False
 			client = proxy_manager.start_client()
 			if client.proxy is None:
 				print("ERROR: Proxy client is None")
-				return None, None, None
+				return None
 			options.add_argument(f'--proxy-server={client.proxy}')
 			return webdriver.Chrome(options=options, service=service), client, server
 		except Exception as e:
 			print("ERROR: Exception occurred when opening proxy\n", e)
-			return None, None, None
-	return webdriver.Chrome(options=options, service=service), None, None
+			return None
+	return webdriver.Chrome(options=options, service=service)
 
 
 def wait_for_requests(client, find_in: str = '.ts', timeout: int = 5):
@@ -200,30 +221,50 @@ def wait_for_requests(client, find_in: str = '.ts', timeout: int = 5):
 		if len(requests_wanted) > 0: return requests_wanted
 
 
-def wait_and_click_xpath_driver(driver, xpath: str, timeout: int = 5) -> bool:
+def wait_clickable_element(driver: webdriver, element_locator: str, by: str = By.XPATH, click: bool = True,
+						   submit: bool = False, timeout: int = 5) -> bool:
 	"""
-	Wait until the xpath exists and click in it with a max timeout
-	@param driver: webdriver
-	@param xpath: The xpath you want to click
-	@param timeout: The max time to wait until abandon
-	@return: return True if clicked or False if not clicked
+	DONT WORK EVERY TIME
+	Wait until the element exists and click/submit it
+	@param driver: Webdriver
+	@param by: By.XPATH, ID,
+	@param element_locator: The value to find the element
+	@param click: Click the element
+	@param submit: Submit the element
+	@param timeout: The max time to wait
+	@return: return the success of the function, True Successed, False Error
 	"""
-	
 	try:
-		# Wait for the element to be clickable
-		element = WebDriverWait(driver, timeout).until(
-			ec.element_to_be_clickable((By.XPATH, xpath))
-		)
-		# Click the element
-		element.click()
+		element = WebDriverWait(driver, timeout).until(ec.element_to_be_clickable((by, element_locator)))
+		if click: element.click()
+		if submit: element.submit()
 		return True
 	except Exception as e:
-		# Handle any exceptions (e.g., TimeoutException, ElementClickInterceptedException)
-		print(f"An error occurred: {e}")
+		print(f"Exception: {e}")
 		return False
 
 
-
-
-
-
+def check_element(driver: webdriver, by: str = By.XPATH, value: str = '', click: bool = False, submit: bool = False,
+				  timeout: int = 5) -> bool | None:
+	"""
+	Find a element and click/submit if the element has been found
+	@param driver: Webdriver
+	@param by: Webdriver By
+	@param value: Locator
+	@param click: Click if find the element
+	@param submit: Submit if find the element
+	@param timeout: The max time to wait the element
+	@return: True=Successed | False=Failed
+	"""
+	if value == '': print('No value in check_element()'); return False
+	
+	start = time.monotonic()
+	while time.monotonic() - start <= timeout:
+		try:
+			element = driver.find_element(by, value)
+			if click: element.click()
+			if submit: element.submit()
+			return True
+		except:
+			time.sleep(0.5)
+	return False

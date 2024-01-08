@@ -1,9 +1,10 @@
-from shared import get_random_str, download_urlfile
+import pytube.exceptions
+
+from Shared import get_random_str, download_urlfile
 from dataclasses import dataclass, field
 from pytube import YouTube, Playlist, Stream
 from mutagen.mp4 import MP4
 from slugify import slugify
-from time import monotonic
 from colorama import Fore
 from pathlib import Path
 import logging
@@ -17,8 +18,7 @@ __future__ = ("Save to file as history with download infos (date, result, time, 
 			  "Auto categorize videos"
 			  "HUD"
 			  "MultiProcessing"
-			  "Multi downloads in same time"
-			  "Optimize")
+			  "Multi downloads in same time")
 
 AUTHORS = {
 	"ALTER": ("", ["Horror", "Movie"]),
@@ -189,7 +189,7 @@ AUTHORS = {
 	"Millomaker": ("", ["Favorite", "DIY"]),
 	"Ming Jin": ("", ["Learn"]),
 	"Mister V": ("", ["Favorite", "Entertainment"]),
-	"MisterFlech": ("", []),
+	"MisterFlech": ("", [""]),
 	"Monsieur Bidouille": ("", ["Favorite", "Learn"]),
 	"Monsieur Phi": ("", ["Favorite", "Psychology"]),
 	"Montreux Comedy": ("", ["Favorite", "Entertainment"]),
@@ -318,7 +318,10 @@ class Video:
 								 replacements=[['Asmr', ''], ['\'', '']]).title()
 	
 	def __get_tags(self) -> list[str]:
-		author_tags = AUTHORS.get(self.youtube.author, ['Other'])[1]
+		try:
+			author_tags = AUTHORS.get(self.youtube.author, ['Other'])[1]
+		except IndexError:
+			author_tags = []
 		video_length = 'TitTok' if self.youtube.length < 2 * 60 else 'Short' if self.youtube.length < 45 * 60 else 'Long'
 		return author_tags + [video_length] if author_tags is not None else [video_length]
 	
@@ -332,12 +335,17 @@ class Video:
 		return f'{hours:2d}h{minutes:2d}m{seconds:2d}' if hours > 0 else f'{minutes:2d}m{seconds:2d}' if minutes > 0 else f'{seconds:2d}s'
 	
 	def __get_audio_stream(self) -> Stream | None:
-		audio = None
 		try:
 			audio = self.youtube.streams.filter(type='audio').order_by('abr').desc().first()
 			logging.info(f"Audio Stream Found: {self.audio_stream}")
+		except pytube.exceptions.AgeRestrictedError:
+			print(f'{Fore.RED}This Video is Age Restricted: Can\'t Download it{self.filename} {Fore.RESET}')
+			self.can_download_codes.append(2)
+			return None
 		except (AttributeError, TypeError, ValueError):
-			logging.error(f"Error getting streams audio or video (Streams): ",self.youtube.streams.filter(type='audio'))
+			logging.error(f"Error getting streams audio or video (Streams): ", self.youtube.streams.filter(type='audio'))
+			self.can_download_codes.append(2)
+			return None
 		
 		return audio
 	
@@ -346,11 +354,14 @@ class Video:
 		try:
 			video = self.youtube.streams.filter(subtype='webm', type='video').order_by('resolution').desc().first()
 			logging.info(f"Audio Stream Found: {self.audio_stream}")
-		except (TypeError, ValueError):
-			logging.error(f"Error getting streams audio or video (Streams): ",
-						  self.youtube.streams.filter(type='video'))
+		except pytube.exceptions.AgeRestrictedError:
+			print(f'{Fore.RED}This Video is Age Restricted: Can\'t Download it{self.filename}{Fore.RESET}')
 			self.can_download_codes.append(2)
-		
+			return None
+		except (TypeError, ValueError):
+			logging.error(f"Error getting streams audio or video (Streams): ", self.youtube.streams.filter(type='video'))
+			self.can_download_codes.append(2)
+			return None
 		return video
 	
 	def __verify(self):
