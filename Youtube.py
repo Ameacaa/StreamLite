@@ -12,13 +12,8 @@ import shutil
 import os
 import re
 
-__version__ = "1.2"
-__future__ = ("Save to file as history with download infos (date, result, time, size, ...); "
-			  "Make the default values more easy to change"
-			  "Auto categorize videos"
-			  "HUD"
-			  "MultiProcessing"
-			  "Multi downloads in same time")
+LOGFILE = r'B:\Projects\_new_\StreamLite\logs\yt_debug.log'
+LOGGINGLEVEL = logging.DEBUG
 
 AUTHORS = {
 	"ALTER": ("", ["Horror", "Movie"]),
@@ -350,7 +345,6 @@ class Video:
 		return audio
 	
 	def __get_video_stream(self) -> Stream | None:
-		video = None
 		try:
 			video = self.youtube.streams.filter(subtype='webm', type='video').order_by('resolution').desc().first()
 			logging.info(f"Audio Stream Found: {self.audio_stream}")
@@ -592,7 +586,7 @@ def download(video: Video, skip_existing: bool) -> None:
 
 
 def main(user_urls: list[str], destination: str, skip_existing: bool) -> None:
-	logging.basicConfig(filename=r'B:\Projects\_new_\StreamLite\logs\yt_debug.log', encoding='utf-8', level=logging.DEBUG)
+	logging.basicConfig(filename=LOGFILE, encoding='utf-8', level=LOGGINGLEVEL)
 	
 	youtube_urls, playlist_urls = separate_urls(user_urls)
 	
