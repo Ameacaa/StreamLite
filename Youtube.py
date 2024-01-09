@@ -1,19 +1,32 @@
-import pytube.exceptions
-
-from Shared import get_random_str, download_urlfile
+from Shared import download_urlfile, chronofunc
 from dataclasses import dataclass, field
-from pytube import YouTube, Playlist, Stream
+from pytube import YouTube, Playlist, Stream, exceptions
 from mutagen.mp4 import MP4
 from slugify import slugify
 from colorama import Fore
 from pathlib import Path
+import speedtest
 import logging
 import shutil
 import os
 import re
 
+CHRONO_FUNC_FILEPATH = r'B:\Projects\_new_\StreamLite\logs\yt_speeds.txt'
 LOGFILE = r'B:\Projects\_new_\StreamLite\logs\yt_debug.log'
 LOGGINGLEVEL = logging.DEBUG
+SHOW_EXTENTED_ERRORS = False
+
+COLORS = {
+	"error": Fore.RED,
+	"warning": Fore.YELLOW,
+	"reset": Fore.RESET,
+	"title": Fore.CYAN,
+	"author": Fore.MAGENTA,
+	"exceptions": Fore.BLUE,
+	"file_exist": Fore.WHITE,
+	"dl_succeed": Fore.GREEN,
+	"dl_failed": Fore.RED
+}
 
 AUTHORS = {
 	"ALTER": ("", ["Horror", "Movie"]),
@@ -276,332 +289,373 @@ AUTHORS = {
 	"VLRN | Valerian": ("", ["Gamedev"]),
 	"Vous Avez Le Droit": ("", ["Favorite", "Learn"]),
 	"Waked XY": ("", ["Favorite", "Cybersecurity"]),
-	"Wankil Studio - Laink et Terracid": ("", ["Favorite", "Entertainment"]),
-	"Wankil Studio - Les VOD": ("", ["Favorite", "VOD"]),
+	"Wankil Studio - Laink et Terracid": ("Wankil Studio", ["Favorite", "Entertainment"]),
+	"Wankil Studio - Les VOD": ("Wankil VOD", ["Favorite", "VOD"]),
 	"White Box Dev": ("", ["Favorite", "Programming"]),
 	"Wildeye Demon": ("", ["Favorite", "Reportage"]),
 	"Yann Bouvier | YannToutCourt": ("", ["History"]),
 	"Yann Piette": ("", ["Psychology"]),
 	"Zyger": ("", ["Gamedev"])
-	
 }
-errors = list()
+
+retry_later = []
+internet_speed = -1
 
 
 @dataclass
 class Video:
-	youtube: YouTube = field()
-	destination: str = field()
 	url: str = field()
-	can_download_codes: list[int] = field(init=False)
-	filename: str = field(init=False, default='')  # Error Code 10
-	thumbnail_url: str = field(init=False, default='')  # Error Code 11
-	audio_stream: Stream | None = field(init=False, default=None)  # Error Code 1 - Can't download
-	video_stream: Stream | None = field(init=False, default=None)  # Error Code 2 - Can't download
-	author: str = field(init=False, default='')  # Error Code 12
+	destination: str = field()
+	youtube: YouTube | None = field()
+	playlist_index: int = field()
+	title: str = field(init=False, default='')
+	thumbnail_url: str | None = field(init=False, default='')
+	audio_stream: Stream | None = field(init=False, default=None)
+	video_stream: Stream | None = field(init=False, default=None)
+	author: str = field(init=False, default='')
 	duration: str = field(init=False, default='')
-	tags: list[str] = field(init=False, default=list)  # Error Code 13
-	filesize_mb: float = field(init=False, default=-1)  # Error Code 14
-	
-	def __get_filename(self) -> str:
-		return slugify(self.youtube.title, max_length=128, word_boundary=True, separator=" ", lowercase=False,
-					   replacements=[['Asmr', ''], ['\'', '']]).title() + '.mp4'
-	
-	def __get_author(self) -> str:
-		author = AUTHORS.get(self.youtube.author, ('', ''))[0]
-		return author or slugify(self.youtube.author, max_length=24, word_boundary=True, separator=" ", lowercase=False,
-								 replacements=[['Asmr', ''], ['\'', '']]).title()
-	
-	def __get_tags(self) -> list[str]:
-		try:
-			author_tags = AUTHORS.get(self.youtube.author, ['Other'])[1]
-		except IndexError:
-			author_tags = []
-		video_length = 'TitTok' if self.youtube.length < 2 * 60 else 'Short' if self.youtube.length < 45 * 60 else 'Long'
-		return author_tags + [video_length] if author_tags is not None else [video_length]
-	
-	def __get_duration(self) -> str:
-		"""
-		Get the video duration in hour:minutes:seconds, if hour or minutes is zero, it's not represented
-		@return: String that represent time in hh:mm:ss
-		"""
-		hours, remainder = divmod(self.youtube.length, 3600)
-		minutes, seconds = divmod(remainder, 60)
-		return f'{hours:2d}h{minutes:2d}m{seconds:2d}' if hours > 0 else f'{minutes:2d}m{seconds:2d}' if minutes > 0 else f'{seconds:2d}s'
-	
-	def __get_audio_stream(self) -> Stream | None:
-		try:
-			audio = self.youtube.streams.filter(type='audio').order_by('abr').desc().first()
-			logging.info(f"Audio Stream Found: {self.audio_stream}")
-		except pytube.exceptions.AgeRestrictedError:
-			print(f'{Fore.RED}This Video is Age Restricted: Can\'t Download it{self.filename} {Fore.RESET}')
-			self.can_download_codes.append(2)
-			return None
-		except (AttributeError, TypeError, ValueError):
-			logging.error(f"Error getting streams audio or video (Streams): ", self.youtube.streams.filter(type='audio'))
-			self.can_download_codes.append(2)
-			return None
-		
-		return audio
-	
-	def __get_video_stream(self) -> Stream | None:
-		try:
-			video = self.youtube.streams.filter(subtype='webm', type='video').order_by('resolution').desc().first()
-			logging.info(f"Audio Stream Found: {self.audio_stream}")
-		except pytube.exceptions.AgeRestrictedError:
-			print(f'{Fore.RED}This Video is Age Restricted: Can\'t Download it{self.filename}{Fore.RESET}')
-			self.can_download_codes.append(2)
-			return None
-		except (TypeError, ValueError):
-			logging.error(f"Error getting streams audio or video (Streams): ", self.youtube.streams.filter(type='video'))
-			self.can_download_codes.append(2)
-			return None
-		return video
-	
-	def __verify(self):
-		logging.info("Verifying class values")
-		
-		if self.filename == "":
-			self.filename = get_random_str(16, 'ud')
-			logging.error(f"New Filename={self.filename}")
-			self.can_download_codes.append(10)
-		
-		if self.author == "":
-			self.author = get_random_str(16, 'ud')
-			logging.error(f"New Author={self.author}")
-			self.can_download_codes.append(12)
-		
-		if self.thumbnail_url == "":
-			logging.error(f"No thumbnail url found")
-			self.can_download_codes.append(11)
-		
-		if len(self.tags) == 0:
-			logging.error(f"No tags found, even video length tags")
-			self.can_download_codes.append(13)
-		
-		if self.audio_stream is None:
-			logging.error(f"Audio Stream is None")
-			self.can_download_codes.append(1)
-		
-		if self.video_stream is None:
-			logging.error(f"Video Stream is None")
-			self.can_download_codes.append(2)
-		
-		if self.filesize_mb == -1:
-			logging.error(f"No filesize found, video or audio stream is None")
-			self.can_download_codes.append(14)
-		
-		logging.info(f"Error download codes= {self.can_download_codes}")
+	tags: list[str] = field(init=False, default=list)
+	filesize_mb: float = field(init=False, default=-1)
 	
 	def __post_init__(self):
-		self.can_download_codes = []
-		logging.info(f"Video Class Values")
-		self.thumbnail_url = self.youtube.thumbnail_url
-		self.filename = self.__get_filename()
-		self.author = self.__get_author()
-		self.tags = self.__get_tags()
-		self.duration = self.__get_duration()
-		self.filesize_mb = -1
-		logging.info(f"name={self.filename}\nauthor={self.author}\ntags={self.tags}\nduration={self.duration}\nwatch_url={self.url}\nthumbnail_url={self.thumbnail_url}")
+		def get_youtube() -> YouTube | None:
+			if self.youtube is not None: return self.youtube
+			try:
+				_youtube = YouTube(self.url)
+				return _youtube if _youtube.watch_html is not None else None
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				return None
 		
-		self.audio_stream = self.__get_audio_stream()
-		self.video_stream = self.__get_video_stream()
-		if self.audio_stream is None or self.video_stream is None:
-			logging.error(f"audio_stream={self.audio_stream}\nvideo_stream={self.video_stream}\nfilesize={self.filesize_mb}")
-			self.__verify()
-			return
+		def get_title() -> str:
+			_yt_title = str(self.youtube.title).lower()  # To simplify replace
+			_toreplace = [['asmr', ''], ['\'', ''], ['vod', '']]  # Need to be in lowercase
+			return slugify(_yt_title, max_length=128, word_boundary=True, separator=" ", lowercase=False,
+						   replacements=_toreplace).title() + '.mp4'
 		
-		self.filesize_mb = self.audio_stream.filesize_mb + self.video_stream.filesize_mb
-		logging.info(f"audio_stream={self.audio_stream}\nvideo_stream={self.video_stream}\nfilesize={self.filesize_mb}")
-		self.__verify()
+		def get_author() -> str:
+			_toreplace = [['asmr', ''], ['\'', ''], ['vod', '']]  # Need to be in lowercase
+			_author = self.youtube.author
+			try:
+				if _author in AUTHORS and AUTHORS.get(_author, ('', ''))[0] != '':
+					return AUTHORS.get(_author, ('', ''))[0]
+			except Exception as e:
+				_author = self.youtube.author
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(
+					f"{COLORS['error']}The author {_author} in dictionary is not properly write{COLORS['reset']}")
+			finally:
+				return slugify(_author.lower(), max_length=24, word_boundary=True, separator=" ", lowercase=False,
+							   replacements=_toreplace).title()
+		
+		def get_thumbnail_url() -> str | None:
+			try:
+				_url = self.youtube.thumbnail_url
+				return _url if _url is not None or _url == '' else None
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				return None
+		
+		def get_duration() -> str:
+			hours, remainder = divmod(self.youtube.length, 3600)
+			minutes, seconds = divmod(remainder, 60)
+			
+			hours = str(hours).zfill(2)
+			minutes = str(minutes).zfill(2)
+			seconds = str(seconds).zfill(2)
+			
+			return f'{hours}h{minutes}m{seconds}' if int(hours) > 0 else f'{minutes}m{seconds}' if int(
+				minutes) > 0 else f'{seconds}s'
+		
+		def get_tags() -> list[str]:
+			try:
+				author_tags = AUTHORS.get(self.youtube.author, ['Other'])[1]
+				if author_tags is None: author_tags = []
+			except IndexError:
+				author_tags = []
+			except Exception as e:
+				author_tags = []
+				print(e)
+			
+			return author_tags + [
+				'TitTok' if self.youtube.length < 2 * 60 else 'Short' if self.youtube.length < 45 * 60 else 'Long']
+		
+		def get_audio_stream() -> Stream | None:
+			try:
+				return self.youtube.streams.filter(type='audio').order_by('abr').desc().first()
+			except exceptions.AgeRestrictedError:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["error"], f"{self}: Age Restricted - Passing", COLORS["reset"])
+				return None
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				return None
+		
+		def get_video_stream() -> Stream | None:
+			try:
+				return self.youtube.streams.filter(subtype='webm', type='video').order_by('resolution').desc().first()
+			except exceptions.AgeRestrictedError:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["error"], f"{self}: Age Restricted - Passing", COLORS["reset"])
+				return None
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				return None
+		
+		def get_filesize_mb() -> float:
+			return -1 if self.audio_stream is None or self.video_stream is None \
+				else (self.audio_stream.filesize_mb + self.video_stream.filesize_mb)
+		
+		self.youtube = get_youtube()
+		if self.youtube is None: return
+		self.title = get_title()
+		self.author = get_author()
+		self.thumbnail_url = get_thumbnail_url()
+		self.duration = get_duration()
+		self.tags = get_tags()
+		self.audio_stream = get_audio_stream()
+		self.video_stream = get_video_stream()
+		self.filesize_mb = get_filesize_mb()
 	
 	def __str__(self):
-		return (f'{Fore.MAGENTA}{self.author}{Fore.RESET} | {Fore.CYAN}{self.filename}{Fore.RESET}\n'
+		max_length = 140
+		string = f"{COLORS['author']}{self.author}{COLORS['reset']} | {COLORS['title']}{self.title}"
+		return f"{string[:max_length - 3]}{COLORS['reset']}..." if len(string) >= max_length \
+			else f"{string}{COLORS['reset']}"
+	
+	def __repr__(self):
+		return (f'{Fore.MAGENTA}{self.author}{Fore.RESET} | {Fore.CYAN}{self.title}{Fore.RESET}\n'
 				f'\t{Fore.BLUE}{self.duration} | {self.filesize_mb:.1f}Mb | {self.tags}\n'
 				f'\tDestination: {self.destination}\n'
 				f'\tVideo: {self.video_stream}\n'
 				f'\tAudio: {self.audio_stream}{Fore.RESET}')
-
-
-def __transform_playlist_url(url: str) -> str:
-	"""
-	Transform a playlist watch url to a playlist list url and return it
-	"""
 	
-	pattern_pl = r"https://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)(?:&list=([a-zA-Z0-9_-]+)(?:&index=\d+)?)?"
-	match = re.compile(pattern_pl).match(url)
-	if match is None: return ''
+	def get_filename(self, temp: bool = False, extension: bool = True):
+		toreplace = [["asmr", ""], ["vod", ""], ["\'", ""], ["laink et terracid", ""]]
+		filename = f'{self.playlist_index}_{self.title}' if self.playlist_index != -1 else f'{self.title}'
+		filename = slugify(filename.lower(), max_length=64, separator='_',
+						   replacements=toreplace) if temp else filename.title()
+		return f'{filename}.mp4' if extension else filename
 	
-	playlist_id = match.group(2)
-	return f'https://www.youtube.com/playlist?list={playlist_id}' if playlist_id else ''
+	def download(self, skip_existing: bool) -> None:
+		def can_download() -> bool:
+			if skip_existing:
+				if Path(self.destination, self.title).is_file():
+					print(f"{COLORS['file_exist']}: Already exist{Fore.RESET}")
+					return False
+			
+			if self.audio_stream is None or self.video_stream is None:
+				print(f"{COLORS['error']}: No stream{COLORS['reset']}")
+				retry_later.append(self)
+				return False
+			
+			return True
+		
+		def download_thumbnail() -> bool:
+			if self.thumbnail_url is None: return False
+			try:
+				download_urlfile(self.thumbnail_url, _paths["thumbnail_path"], 1024 * 1024 * 24)
+				return True
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error downloading the thumbnail of the video",
+											   COLORS["reset"])
+				return False
+		
+		def download_streams() -> bool:
+			if self.audio_stream is None or self.video_stream is None: return False
+			try:
+				self.audio_stream.download(output_path=str(_paths["folder_path"]), filename="audio.webm", max_retries=4)
+				self.video_stream.download(output_path=str(_paths["folder_path"]), filename="video.webm", max_retries=4)
+				return True
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error downloading the streams of the video",
+											   COLORS["reset"])
+				retry_later.append(self)
+				return False
+		
+		def combine_ffmpeg() -> bool:
+			cmd_thumbnail = f'ffmpeg -hide_banner -loglevel error -i {_paths["video_path"]} -i {_paths["audio_path"]} -i {_paths["thumbnail_path"]} -map 0 -map 1 -map 2 -c copy -map_metadata 0 -disposition:2 attached_pic -y {_paths["ffmpeg_filepath"]}'
+			cmd_nothumbnail = f'ffmpeg -hide_banner -loglevel error -i {_paths["video_path"]} -i {_paths["audio_path"]} -c copy -y {_paths["ffmpeg_filepath"]}'
+			try:
+				if have_thumbnail:
+					os.system(cmd_thumbnail)
+				else:
+					os.system(cmd_nothumbnail)
+				return True
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error combining the streams", COLORS["reset"])
+				retry_later.append(self)
+				return False
+		
+		def rename_video() -> bool:
+			try:
+				if Path(out_filepath).is_file():
+					print(": File with the same name already exist ")
+					return False
+				os.rename(Path(_paths["ffmpeg_filepath"]), Path(out_filepath))
+				return True
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error renaming the video", COLORS["reset"])
+				return False
+		
+		def add_metadata() -> bool:
+			try:  # https://mutagen.readthedocs.io/en/latest/api/mp4.html
+				mp4 = MP4(out_filepath)
+				mp4["\xa9gen"] = "; ".join(self.tags)
+				mp4["\xa9ART"] = self.author
+				mp4["\xa9cmt"] = self.youtube.publish_date.strftime('%d-%m-%Y')
+				mp4.save()
+				return True
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error Adding Metadata in the video", COLORS["reset"])
+				return False
+		
+		def delete_temp_folder() -> bool:
+			try:
+				shutil.rmtree(_paths["folder_path"])
+				return True
+			except Exception as e:
+				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error Deleting temp folder", COLORS["reset"])
+				return False
+		
+		print(self, end=': ', flush=True)
+		
+		if not can_download(): return
+		
+		# Prepare all paths needed
+		_name = self.get_filename(temp=True, extension=False)  # Temporary name just for the dictionary
+		_paths = {  # TEMPORARY PATHS
+			"folder_path": Path(self.destination, _name),  # Create this file to contain audio. video and thumbnail
+			"audio_path": str(Path(self.destination, _name, "audio.webm")),  # The absolute path of the audio
+			"video_path": str(Path(self.destination, _name, "video.webm")),  # The absolute path of the video
+			"thumbnail_path": str(Path(self.destination, _name, "thumbnail.jpg")),  # The absolute path of the thumbnail
+			"ffmpeg_filepath": str(Path(self.destination, self.get_filename(temp=True, extension=True)))
+			# This file is in destination folder but with a name that ffmpeg accept (old_name)
+		}
+		out_filepath = str(Path(self.destination, self.get_filename(temp=False, extension=True)))  # This is the destination with the good name (new_name)
+		
+		# Create the path if needed
+		_paths["folder_path"].mkdir(parents=True, exist_ok=True)
+		
+		have_thumbnail = download_thumbnail()
+		have_errors = False
+		if self.youtube.age_restricted:
+			print(f'{COLORS["dl_failed"]}Age Restricted{Fore.RESET}')
+			return
+			
+		if not download_streams():
+			print(f'{COLORS["dl_failed"]}Download Failed{Fore.RESET}')
+			return
+		
+		if not combine_ffmpeg():
+			print(f'{COLORS["dl_failed"]}Combine FFMPEG Error{Fore.RESET}')
+			return
+		
+		if Path(out_filepath).is_file():
+			print(f'{COLORS["warning"]}Renaming Video Error (Already Exist - Keeping Temporary Name){Fore.RESET}', sep='\n')
+			out_filepath = _paths["ffmpeg_filepath"]
+		elif not rename_video():
+			print(f'{COLORS["warning"]}Renaming Video Error{Fore.RESET}', sep='\n')
+			return
+		
+		if not add_metadata():
+			print(f'{COLORS["warning"]}Adding Metadata Error{Fore.RESET}', sep='\n')
+			return
+		
+		if not delete_temp_folder():
+			print(f'{COLORS["warning"]}Error deleting temp folder{Fore.RESET}', sep='\n')
+			return
+		
+		print(f'{COLORS["warning"] if have_errors else COLORS["dl_succeed"]}Succeed{Fore.RESET}')
 
 
-def __get_url_and_is_playlist(url: str) -> (str, bool):
-	"""
-	Get a valid url (YouTube -> Watch video url; Playlist -> Playlist list url) and return if is playlist or not,
-	other urls can work but not sure for all
-	"""
+def separate_urls(user_urls: list[str]) -> (list[str], list[str]):
+	def transform_playlist_url(url: str) -> str:
+		pattern_pl = r"https://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)(?:&list=([a-zA-Z0-9_-]+)(?:&index=\d+)?)?"
+		match = re.compile(pattern_pl).match(url)
+		if match is None: return ''
+		
+		playlist_id = match.group(2)
+		return f'https://www.youtube.com/playlist?list={playlist_id}' if playlist_id else ''
+	
 	re_watch = r"(?:https://www.youtube.com/watch[?]v=)[a-zA-Z0-9_-]{11}($|&t=[0-9]{1,}s)"
 	re_pl_list = r"(?:https://www.youtube.com/playlist[?]list=)[a-zA-Z0-9_-]{34}$"
 	re_pl_watch = r"(?:https://www.youtube.com/watch[?]v=)[a-zA-Z0-9_-]{11}(?:&list=)[a-zA-Z0-9_-]{34}"
 	
-	if re.search(re_watch, url) is not None:
-		return url, False
-	
-	elif re.search(re_pl_list, url) is not None:
-		return url, True
-	
-	elif re.search(re_pl_watch, url) is not None:
-		url = __transform_playlist_url(url)
-		if url != '' and re.search(re_pl_list, url) is not None:
-			return url, True
-	
-	return '', False
-
-
-def separate_urls(user_urls: list[str]) -> (list[str], list[str]):
-	"""
-	Return (youtube_urls, playlist_urls) removing duplicates and checking if the url is a valid youtube url
-	"""
-	youtube_urls = []
-	playlist_urls = []
+	youtube_urls, playlist_urls = [], []
 	
 	for user_url in user_urls:
-		url, is_playlist = __get_url_and_is_playlist(user_url)
-		if url == '':
-			logging.error(f"Not valid url => {url}")
-			print(f"ERROR: Not valid url => {url}")
+		if re.search(re_watch, user_url) is not None:
+			youtube_urls.append(user_url)
+		elif re.search(re_pl_list, user_url) is not None:
+			playlist_urls.append(user_url)
+		
+		elif re.search(re_pl_watch, user_url) is not None:
+			returned_url = transform_playlist_url(user_url)
+			if returned_url == '' or re.search(re_pl_list, returned_url) is None:
+				print(f"{COLORS['error']}ERROR: Not valid url => {returned_url}{COLORS['reset']}")
+				continue
+			playlist_urls.append(returned_url)
+		else:
+			print(f"{COLORS['error']}ERROR: Not valid url => {user_url}{COLORS['reset']}")
 			continue
-		playlist_urls.append(url) if is_playlist else youtube_urls.append(url)
 	
 	return list(set(youtube_urls)), list(set(playlist_urls))
 
 
-def __download_files(video: Video, _folder: str, _audioname: str, _videoname: str, _thumbnailname: str) -> int:
-	# Streams
-	try:
-		video.audio_stream.download(output_path=_folder, filename=_audioname, max_retries=2)
-		video.video_stream.download(output_path=_folder, filename=_videoname, max_retries=2)
-	except:
-		logging.error("Error Download: a problem occured while downloading streams", video)
-		print('Error Download: a problem occured while downloading files')
-		errors.append(video)
-		return 0  # Can't download
-	# Thumbnail
-	try:
-		if 11 in video.can_download_codes:
-			logging.error("Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found",video)
-			print('Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found')
-			return 1  # No thumbnail
-		download_urlfile(video.thumbnail_url, str(Path(_folder, _thumbnailname)))
-	except:
-		logging.error("Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found", video)
-		print('Error Download Thumbnail: The video will put a random thumbnail because no thumbnail found')
-		return 1  # No thumbnail
-	return -1  # good - useless
+def get_nvideos(playlist_urls: list[str]) -> int:
+	counter = 0
+	for url in playlist_urls: counter += len(Playlist(url).video_urls)
+	return counter
 
 
-def __combine_files(video: Video, _audio: str, _video: str, _thumbnail: str | None, _ffmpeg: str) -> int:
-	command = f"ffmpeg -hide_banner -loglevel error -i {_video} -i {_audio} -c copy -y {_ffmpeg}" if _thumbnail is None \
-		else f'ffmpeg -hide_banner -loglevel error -i {_video} -i {_audio} -i {_thumbnail} -map 0 -map 1 -c copy -map_metadata 0 -disposition:2 attached_pic -y {_ffmpeg}'
-	try:
-		os.system(command)
-		return -1  # Good
-	except:
-		logging.error("Error combining files: ", video)
-		print('Error Combine: a problem occured while combining files')
-		errors.append(video)
-		return 0  # Error
-
-
-def __rename_file(old_filepath: str, new_filepath: str):
-	try:
-		os.rename(Path(old_filepath), Path(new_filepath))
-	except:
-		logging.error(f'Error Renaming file: The file will keep the temporary name(old={old_filepath}; new={new_filepath})')
-		print(f'Error Renaming file: The file will keep the temporary name; filename={old_filepath}')
-
-
-def __add_file_metadata(video: Video, filepath: str):
-	try:
-		mp4 = MP4(filepath)
-		mp4["\xa9gen"] = "; ".join(video.tags)
-		mp4["\xa9ART"] = video.author
-		mp4["\xa9cmt"] = video.youtube.publish_date.strftime('%d-%m-%Y')
-		mp4.save()
-	except:
-		logging.error(
-			f'Error Metadata: can\'t insert metadata in file(genre={"; ".join(video.tags)}, artist={video.author}, comment={video.youtube.publish_date.strftime("%d-%m-%Y")})')
-		print(
-			f'Error Metadata: can\'t insert metadata in file\n\tgenre={"; ".join(video.tags)}\n\tartist={video.author}\n\tcomment={video.youtube.publish_date.strftime("%d-%m-%Y")})')
-
-
-def download(video: Video, skip_existing: bool) -> None:
-	print(video)
-	
-	# Check if error code
-	if 1 in video.can_download_codes or 2 in video.can_download_codes:
-		logging.error("This video class have stream missing: ", video)
-		print(f'{Fore.RED}This video have streams missing and can\'t be downloaded{Fore.RESET}')
-		return
-	
-	# Skip if already exist file
-	if skip_existing:
-		if Path(video.destination, video.filename).is_file():
-			print(f'{Fore.YELLOW}Already exist. Passing{Fore.RESET}')
-			return
-	
-	# temp filename - Easy to change
-	_audioname = 'audio.webm'
-	_videoname = 'video.webm'
-	_thumbnailname = 'thumbnail.jpg'
-	_name = slugify(f'{video.author}{video.filename}', max_length=64)
-	
-	_folder = Path(video.destination, _name)
-	_folder.mkdir(parents=True, exist_ok=True)
-	
-	_folder = str(_folder)
-	_audio = str(Path(_folder, _audioname))
-	_video = str(Path(_folder, _videoname))
-	_thumbnail = str(Path(_folder, _thumbnailname))
-	_ffmpeg = str(Path(video.destination, f'{_name}.mp4'))
-	destination = str(Path(video.destination, video.filename))
-	
-	# Download
-	_code = __download_files(video, _folder, _audioname, _videoname, _thumbnailname)
-	if _code == 0: return
-	
-	# Combine
-	_code = __combine_files(video, _audio, _video, _thumbnail if _code != 1 else None, _ffmpeg)
-	if _code == 0: return
-	
-	# Remove temp folder
-	shutil.rmtree(_folder)
-	
-	# Rename
-	__rename_file(_ffmpeg, destination)
-	
-	# Add Metadata
-	__add_file_metadata(video, destination)
+def get_download_speed():
+	st = speedtest.Speedtest()
+	download_speed = st.download()
+	return download_speed / 1_000_000  # Mbts
 
 
 def main(user_urls: list[str], destination: str, skip_existing: bool) -> None:
-	logging.basicConfig(filename=LOGFILE, encoding='utf-8', level=LOGGINGLEVEL)
+	global internet_speed
+	
+	print("Checking internet speed: ", end="")
+	internet_speed = get_download_speed()
+	print(f'{internet_speed:.1f} Mbts\n')
 	
 	youtube_urls, playlist_urls = separate_urls(user_urls)
+	nvideos = len(youtube_urls) + get_nvideos(playlist_urls)
+	print(f"Found {len(youtube_urls) + len(playlist_urls)} urls for {nvideos} videos")
 	
-	for url in youtube_urls:  # Doing this to use less ram and not store all 5000 url video class
-		youtube = YouTube(url)
-		video = Video(youtube, destination, url)
-		download(video, skip_existing)
+	dl_nvideos = 1
+	for url in youtube_urls:
+		print(f'[{dl_nvideos}/{nvideos}]: ', end='', flush=True)
+		video = Video(url=url, destination=destination, youtube=None, playlist_index=-1)
+		video.download(skip_existing)
+		dl_nvideos += 1
 	
 	for url in playlist_urls:
 		playlist = Playlist(url)
 		for counter, youtube in enumerate(playlist.videos):
-			video = Video(youtube, str(Path(destination, slugify(playlist.title, separator='_', lowercase=False, max_length=128))), url)
-			video.filename = f"{counter+1}_{video.filename}"
-			download(video, skip_existing)
+			_destination = str(Path(destination, slugify(playlist.title, separator='_', lowercase=False, max_length=128)))
+			video = Video(url=url, destination=_destination, youtube=youtube, playlist_index=counter)
+			video.download(skip_existing)
+			dl_nvideos += 1
 
 
 if __name__ == '__main__':
 	print("It does not work like this, use 'main.py -help' to know how to use")
+	__future__ = ["Future Updates - Not ordered"
+				  "Rich console"
+				  "Download progress"
+				  "Multi Download at the time"
+				  "Predict time (filesize/internet_speed)"
+				  "Retry download when failed"
+				  "Debug Logs"
+				  "Others views"
+				  "GUI"]
+	print(*__future__, sep='\n')
+	
