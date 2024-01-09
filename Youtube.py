@@ -1,4 +1,5 @@
-from Shared import download_urlfile, chronofunc
+from functools import wraps
+from Shared import download_urlfile
 from dataclasses import dataclass, field
 from pytube import YouTube, Playlist, Stream, exceptions
 from mutagen.mp4 import MP4
@@ -8,6 +9,7 @@ from pathlib import Path
 import speedtest
 import logging
 import shutil
+import time
 import os
 import re
 
@@ -17,15 +19,15 @@ LOGGINGLEVEL = logging.DEBUG
 SHOW_EXTENTED_ERRORS = False
 
 COLORS = {
-	"error": Fore.RED,
-	"warning": Fore.YELLOW,
-	"reset": Fore.RESET,
-	"title": Fore.CYAN,
-	"author": Fore.MAGENTA,
+	"error"     : Fore.RED,
+	"warning"   : Fore.YELLOW,
+	"reset"     : Fore.RESET,
+	"title"     : Fore.CYAN,
+	"author"    : Fore.MAGENTA,
 	"exceptions": Fore.BLUE,
-	"file_exist": Fore.WHITE,
+	"file_exist": Fore.YELLOW,
 	"dl_succeed": Fore.GREEN,
-	"dl_failed": Fore.RED
+	"dl_failed" : Fore.RED
 }
 
 AUTHORS = {
@@ -302,6 +304,22 @@ retry_later = []
 internet_speed = -1
 
 
+def chronofunc(func):
+	def write_in_file(data: str):
+		with open(CHRONO_FUNC_FILEPATH, 'at', encoding='utf-8') as file:
+			file.write(data)
+
+	@wraps(func)
+	def wrapper(*args, **kwargs):
+		begin = time.monotonic_ns()
+		result = func(*args, **kwargs)
+		timetake = (time.monotonic_ns() - begin) / 1_000_000_000
+		write_in_file(f'Time taken ({func.__name__}): {timetake:.3f} seconds => args=({args})\n')
+		return result
+
+	return wrapper
+
+
 @dataclass
 class Video:
 	url: str = field()
@@ -330,8 +348,7 @@ class Video:
 		def get_title() -> str:
 			_yt_title = str(self.youtube.title).lower()  # To simplify replace
 			_toreplace = [['asmr', ''], ['\'', ''], ['vod', '']]  # Need to be in lowercase
-			return slugify(_yt_title, max_length=128, word_boundary=True, separator=" ", lowercase=False,
-						   replacements=_toreplace).title() + '.mp4'
+			return slugify(_yt_title, max_length=128, word_boundary=True, separator=" ", lowercase=False, replacements=_toreplace).title()
 		
 		def get_author() -> str:
 			_toreplace = [['asmr', ''], ['\'', ''], ['vod', '']]  # Need to be in lowercase
@@ -339,14 +356,14 @@ class Video:
 			try:
 				if _author in AUTHORS and AUTHORS.get(_author, ('', ''))[0] != '':
 					return AUTHORS.get(_author, ('', ''))[0]
+				else:
+					_author = self.youtube.author
+					return slugify(_author.lower(), max_length=48, word_boundary=True, separator=" ", lowercase=False, replacements=_toreplace).title()
 			except Exception as e:
 				_author = self.youtube.author
 				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
-				if SHOW_EXTENTED_ERRORS: print(
-					f"{COLORS['error']}The author {_author} in dictionary is not properly write{COLORS['reset']}")
-			finally:
-				return slugify(_author.lower(), max_length=24, word_boundary=True, separator=" ", lowercase=False,
-							   replacements=_toreplace).title()
+				if SHOW_EXTENTED_ERRORS: print(f"{COLORS['error']}The author {_author} in dictionary is not properly write{COLORS['reset']}")
+				return slugify(_author.lower(), max_length=48, word_boundary=True, separator=" ", lowercase=False, replacements=_toreplace).title()
 		
 		def get_thumbnail_url() -> str | None:
 			try:
@@ -364,8 +381,7 @@ class Video:
 			minutes = str(minutes).zfill(2)
 			seconds = str(seconds).zfill(2)
 			
-			return f'{hours}h{minutes}m{seconds}' if int(hours) > 0 else f'{minutes}m{seconds}' if int(
-				minutes) > 0 else f'{seconds}s'
+			return f'{hours}h{minutes}m{seconds}' if int(hours) > 0 else f'{minutes}m{seconds}' if int(minutes) > 0 else f'{seconds}s'
 		
 		def get_tags() -> list[str]:
 			try:
@@ -431,20 +447,24 @@ class Video:
 	def get_filename(self, temp: bool = False, extension: bool = True):
 		toreplace = [["asmr", ""], ["vod", ""], ["\'", ""], ["laink et terracid", ""]]
 		filename = f'{self.playlist_index}_{self.title}' if self.playlist_index != -1 else f'{self.title}'
-		filename = slugify(filename.lower(), max_length=64, separator='_',
-						   replacements=toreplace) if temp else filename.title()
+		filename = slugify(filename.lower(), max_length=64, separator='_', replacements=toreplace) if temp else filename.title()
 		return f'{filename}.mp4' if extension else filename
 	
+	@chronofunc
 	def download(self, skip_existing: bool) -> None:
 		def can_download() -> bool:
 			if skip_existing:
 				if Path(self.destination, self.title).is_file():
-					print(f"{COLORS['file_exist']}: Already exist{Fore.RESET}")
+					print(f"{COLORS['file_exist']}Already exist{Fore.RESET}")
 					return False
 			
 			if self.audio_stream is None or self.video_stream is None:
-				print(f"{COLORS['error']}: No stream{COLORS['reset']}")
+				print(f"{COLORS['error']}No stream{COLORS['reset']}")
 				retry_later.append(self)
+				return False
+			
+			if self.youtube.age_restricted:
+				print(f'{COLORS["error"]}Age Restricted{Fore.RESET}')
 				return False
 			
 			return True
@@ -456,10 +476,10 @@ class Video:
 				return True
 			except Exception as e:
 				if SHOW_EXTENTED_ERRORS: print(COLORS["exceptions"], e, COLORS["reset"])
-				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error downloading the thumbnail of the video",
-											   COLORS["reset"])
+				if SHOW_EXTENTED_ERRORS: print(COLORS["warning"], "Error downloading the thumbnail of the video", COLORS["reset"])
 				return False
 		
+		@chronofunc
 		def download_streams() -> bool:
 			if self.audio_stream is None or self.video_stream is None: return False
 			try:
@@ -473,6 +493,7 @@ class Video:
 				retry_later.append(self)
 				return False
 		
+		@chronofunc
 		def combine_ffmpeg() -> bool:
 			cmd_thumbnail = f'ffmpeg -hide_banner -loglevel error -i {_paths["video_path"]} -i {_paths["audio_path"]} -i {_paths["thumbnail_path"]} -map 0 -map 1 -map 2 -c copy -map_metadata 0 -disposition:2 attached_pic -y {_paths["ffmpeg_filepath"]}'
 			cmd_nothumbnail = f'ffmpeg -hide_banner -loglevel error -i {_paths["video_path"]} -i {_paths["audio_path"]} -c copy -y {_paths["ffmpeg_filepath"]}'
@@ -504,7 +525,7 @@ class Video:
 			try:  # https://mutagen.readthedocs.io/en/latest/api/mp4.html
 				mp4 = MP4(out_filepath)
 				mp4["\xa9gen"] = "; ".join(self.tags)
-				mp4["\xa9ART"] = self.author
+				mp4["\xa9ART"] = self.author if self.author is not None else 'ErrorUnknow'
 				mp4["\xa9cmt"] = self.youtube.publish_date.strftime('%d-%m-%Y')
 				mp4.save()
 				return True
@@ -529,12 +550,11 @@ class Video:
 		# Prepare all paths needed
 		_name = self.get_filename(temp=True, extension=False)  # Temporary name just for the dictionary
 		_paths = {  # TEMPORARY PATHS
-			"folder_path": Path(self.destination, _name),  # Create this file to contain audio. video and thumbnail
-			"audio_path": str(Path(self.destination, _name, "audio.webm")),  # The absolute path of the audio
-			"video_path": str(Path(self.destination, _name, "video.webm")),  # The absolute path of the video
-			"thumbnail_path": str(Path(self.destination, _name, "thumbnail.jpg")),  # The absolute path of the thumbnail
-			"ffmpeg_filepath": str(Path(self.destination, self.get_filename(temp=True, extension=True)))
-			# This file is in destination folder but with a name that ffmpeg accept (old_name)
+			"folder_path"    : Path(self.destination, _name),  # Create this file to contain audio. video and thumbnail
+			"audio_path"     : str(Path(self.destination, _name, "audio.webm")),  # The absolute path of the audio
+			"video_path"     : str(Path(self.destination, _name, "video.webm")),  # The absolute path of the video
+			"thumbnail_path" : str(Path(self.destination, _name, "thumbnail.jpg")),  # The absolute path of the thumbnail
+			"ffmpeg_filepath": str(Path(self.destination, self.get_filename(temp=True, extension=True)))  # This file is in destination folder but with a name that ffmpeg accept (old_name)
 		}
 		out_filepath = str(Path(self.destination, self.get_filename(temp=False, extension=True)))  # This is the destination with the good name (new_name)
 		
@@ -543,10 +563,6 @@ class Video:
 		
 		have_thumbnail = download_thumbnail()
 		have_errors = False
-		if self.youtube.age_restricted:
-			print(f'{COLORS["dl_failed"]}Age Restricted{Fore.RESET}')
-			return
-			
 		if not download_streams():
 			print(f'{COLORS["dl_failed"]}Download Failed{Fore.RESET}')
 			return
@@ -573,6 +589,7 @@ class Video:
 		print(f'{COLORS["warning"] if have_errors else COLORS["dl_succeed"]}Succeed{Fore.RESET}')
 
 
+@chronofunc
 def separate_urls(user_urls: list[str]) -> (list[str], list[str]):
 	def transform_playlist_url(url: str) -> str:
 		pattern_pl = r"https://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)(?:&list=([a-zA-Z0-9_-]+)(?:&index=\d+)?)?"
@@ -607,6 +624,7 @@ def separate_urls(user_urls: list[str]) -> (list[str], list[str]):
 	return list(set(youtube_urls)), list(set(playlist_urls))
 
 
+@chronofunc
 def get_nvideos(playlist_urls: list[str]) -> int:
 	counter = 0
 	for url in playlist_urls: counter += len(Playlist(url).video_urls)
@@ -619,6 +637,7 @@ def get_download_speed():
 	return download_speed / 1_000_000  # Mbts
 
 
+@chronofunc
 def main(user_urls: list[str], destination: str, skip_existing: bool) -> None:
 	global internet_speed
 	
@@ -658,4 +677,3 @@ if __name__ == '__main__':
 				  "Others views"
 				  "GUI"]
 	print(*__future__, sep='\n')
-	
